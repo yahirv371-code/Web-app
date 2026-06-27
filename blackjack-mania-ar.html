@@ -1,0 +1,1359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<!--
+  ============================================================================
+  BLACKJACK MANIA — AR GLASSES EDITION
+  Built for Meta Ray-Ban Display (MRBD) using the official "Web Apps" path:
+  https://developers.meta.com/wearables/  ->  Web Apps for MRBD glasses
+  (wearables.developer.meta.com/docs/develop/webapps — Build guide, updated
+  Jun 22 2026, confirmed live via web search/fetch while building this file).
+
+  WHAT THIS FOLLOWS FROM THE OFFICIAL DOCS:
+  - Fixed 600x600px viewport, no scrolling (overflow: hidden on <body>)
+  - Additive waveguide display: pure black = transparent, so the UI uses a
+    near-black canvas with bright, saturated accent colors only
+  - Input is translated by the glasses OS into standard ArrowUp/Down/Left/
+    Right + Enter KeyboardEvents (from Neural Band EMG gestures or the
+    temple cap-touch strip). There is no mouse, touch, or physical keyboard.
+  - Every interactive element carries class="focusable" and is moved between
+    with the documented moveFocus() pattern, exactly as shown in Meta's Build
+    guide sample code.
+  - Save data uses standard localStorage (Web Storage), which the docs list
+    as a supported MRBD Web App capability (5MB limit).
+  - <meta name="mrbd-web-app-capable"> is included per the docs so the
+    platform's discovery surfaces can identify this as MRBD-compatible.
+
+  TABLE PRESENTATION:
+  - Cards use real corner-index styling (rank+suit in opposing corners, big
+    center pip) instead of plain centered text, and slide in from the
+    dealer's "shoe" corner instead of just fading up.
+  - Betting is chip-based: tap 25/100/250/500 chips to build your wager,
+    Clear to reset it, with a small stacked-chip icon next to the numeral —
+    closer to actually placing chips in a betting circle than a +/- stepper.
+    Denomination colors echo real casino convention (25=green, 500=gold);
+    100 and the wheel's "black" pockets use bright cyan instead of literal
+    black/charcoal, since true dark pixels don't emit light on an additive
+    display and would just disappear.
+  - A thin curved rail divides dealer from player like a table's edge trim,
+    and a small printed rules line ("BLACKJACK PAYS 3 TO 2" etc.) sits on
+    the felt the way it would on a real layout.
+  - Hit/Stand carry their real pit hand-signals as captions (tap the felt /
+    wave your hand) — that convention exists so pit cameras can verify a
+    decision without relying on audio, which felt like a nice authentic
+    detail for a HUD that has no microphone anyway.
+
+  RULES IMPLEMENTED:
+  - 6-deck shoe, Fisher-Yates shuffled, auto-reshuffles when it runs low
+  - Dealer peeks for blackjack when showing an Ace or any 10-value card
+  - Insurance: offered only when the dealer's up-card is an Ace (the
+    standard casino trigger), costs half the original bet, pays 2:1
+  - Split: one split per hand (no resplitting), requires matching ranks
+    and enough balance to cover the second hand's bet. Splitting Aces
+    deals exactly one extra card per hand with no further hits, and a
+    21 made from a split hand pays even money, not the 3:2 blackjack
+    bonus — both are standard casino rules for splits
+  - Double: only on the first decision with two cards, doubles the bet
+    and draws exactly one more card
+  - Dealer stands on all 17s (hard or soft) and always plays out fully,
+    even if every player hand has already busted, so the final hand is
+    always shown for clarity
+
+  BATTERY / EFFICIENCY CHOICES (this matters more on glasses than on a
+  phone — there's no big battery to hide behind):
+  - renderTable() never wipes and rebuilds a hand's DOM each call. It
+    diffs against what's already on screen and only creates or replaces
+    the card(s) that actually changed (a new card, or the dealer's hole
+    card flipping face up). That avoids needless layout/paint work AND
+    stops already-dealt cards from re-running their slide-in transition
+    on every render, which the original full-rebuild approach did.
+  - The focus-navigation scan no longer asks the browser to check
+    offsetParent (which forces a synchronous layout) to decide if a
+    control is visible — it checks for a `.hidden-row` ancestor instead,
+    which is a plain class lookup with no forced reflow.
+  - .focusable's hover/focus transition is scoped to the three properties
+    that actually change (border-color, box-shadow, color) instead of
+    `transition: all`, which makes the browser watch every animatable
+    property on every frame of every transition.
+  - Eco mode doesn't just shorten the opening roulette spin, it skips the
+    animation loop entirely and paints the final result in one frame —
+    zero extra requestAnimationFrame calls instead of a shorter run of them.
+  - A visibilitychange listener pauses the dealer's draw-card loop while
+    the page/display is hidden, so the round doesn't quietly play itself
+    out (and keep re-rendering) while nobody can see it.
+  - Card glow/box-shadow is dropped in eco mode and under
+    prefers-reduced-motion, and all animation runs on transform/opacity
+    only, which compositors can handle without re-running layout.
+
+  SCOPE CUTS (deliberate, noted for transparency):
+  - "Back navigation" is listed by Meta as an UNSUPPORTED capability as of
+    this writing, so the app never relies on a hardware back gesture. Every
+    screen has its own on-screen, focusable Menu/Back button instead. Escape
+    is wired up too, but only as a desktop-browser testing convenience.
+  - No resplitting, and no surrender — a 600x600 monocular HUD has limited
+    room for hand state, and these are the least commonly used options at
+    a real table.
+  - Camera, microphone, and offline support are listed as unsupported by
+    Meta for Web Apps today, so this app doesn't attempt them.
+  - This was built and reviewed against the published documentation, but
+    has not been verified on physical MRBD hardware — Meta's preview APIs
+    may shift. Test with arrow keys + Enter in a desktop browser first,
+    then via Developer Mode on real glasses per Meta's "Test" guide.
+
+  HOW TO RUN:
+  - Desktop browser: open this file directly. Arrow keys move focus,
+    Enter activates, mouse clicks also work for convenience.
+  - On MRBD glasses: host this file over HTTPS, enable Developer Mode in
+    the Meta AI app, and load it by URL per Meta's Web Apps "Test" guide.
+  ============================================================================
+-->
+<title>Blackjack Mania — AR Glasses Edition</title>
+<meta name="description" content="Blackjack Mania: a realistic blackjack game built for Meta Ray-Ban Display glasses.">
+<meta name="mrbd-web-app-capable" content="yes">
+<meta name="viewport" content="width=600, height=600, initial-scale=1.0, user-scalable=no">
+<style>
+  :root{
+    --bg:#000000;
+    --felt:#04140f;
+    --gold:#ffc857;
+    --gold-dim:#7a6332;
+    --cyan:#00d4ff;
+    --green:#39ff14;
+    --red:#ff3b5c;
+    --violet:#c77dff;
+    --ink:#e8e8e8;
+    --ink-dim:#8a8f93;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0; padding:0;
+    width:600px; height:600px;
+    overflow:hidden;
+    background:var(--bg);
+    color:var(--ink);
+    font-family:"Trebuchet MS","Segoe UI",system-ui,sans-serif;
+    -webkit-user-select:none; user-select:none;
+  }
+  #app{ position:relative; width:600px; height:600px; }
+  .screen{
+    position:absolute; inset:0; width:600px; height:600px;
+    display:none; flex-direction:column;
+  }
+  .screen.active{ display:flex; }
+
+  /* ---------- shared focus styling (from Meta's Build guide sample) ----------
+     Transition is scoped to the 3 properties that actually change, not
+     `all` — cheaper for the browser to track on every animation frame. */
+  .focusable{
+    transition:border-color 150ms ease, box-shadow 150ms ease, color 150ms ease;
+    border:2px solid transparent;
+    background:#0c0c0c;
+    color:var(--ink);
+    font-family:inherit;
+    font-weight:700;
+    letter-spacing:0.04em;
+    text-align:center;
+    border-radius:10px;
+    cursor:pointer;
+  }
+  .focusable:focus{
+    outline:none;
+    border-color:var(--cyan);
+    box-shadow:0 0 20px rgba(0,212,255,0.45);
+  }
+  .focusable[disabled]{
+    color:#4a4a4a;
+    border-color:transparent;
+    box-shadow:none;
+    cursor:default;
+  }
+  body.eco-mode .focusable{ transition:none; }
+  body.eco-mode .focusable:focus{ box-shadow:none; }
+  @media (prefers-reduced-motion:reduce){
+    .focusable{ transition:none; }
+    .focusable:focus{ box-shadow:none; }
+  }
+
+  /* ================= BOOT / OPENING ================= */
+  #screen-boot{ align-items:center; justify-content:center; }
+  #boot-canvas{ display:block; }
+  #boot-title{
+    position:absolute; top:64px; left:0; width:600px; text-align:center;
+    opacity:0; transition:opacity 600ms ease;
+  }
+  body.eco-mode #boot-title{ transition:none; }
+  #boot-title.show{ opacity:1; }
+  #boot-title h1{
+    margin:0; font-size:34px; letter-spacing:0.12em;
+    color:var(--gold); text-transform:uppercase;
+  }
+  #boot-title p{
+    margin:6px 0 0; font-size:16px; letter-spacing:0.22em;
+    color:var(--cyan); text-transform:uppercase;
+  }
+  #boot-result{
+    position:absolute; bottom:96px; left:0; width:600px; text-align:center;
+    font-size:20px; color:var(--ink-dim); opacity:0; transition:opacity 400ms ease;
+  }
+  body.eco-mode #boot-result{ transition:none; }
+  #boot-result.show{ opacity:1; }
+  #boot-result b{ color:var(--gold); font-size:26px; }
+  #boot-skip{
+    position:absolute; bottom:28px; left:170px; width:260px; height:56px;
+    font-size:16px; text-transform:uppercase;
+  }
+
+  /* ================= START MENU ================= */
+  #screen-menu{ padding:28px 36px; }
+  .menu-header{ text-align:center; margin-bottom:6px; }
+  .menu-header h1{
+    margin:0; font-size:26px; letter-spacing:0.08em; color:var(--gold);
+    text-transform:uppercase;
+  }
+  .menu-header p{
+    margin:4px 0 0; font-size:13px; letter-spacing:0.18em; color:var(--cyan);
+    text-transform:uppercase;
+  }
+  .menu-stats{
+    margin:18px 0 8px; text-align:center; font-size:16px; color:var(--ink);
+  }
+  .menu-stats .balance{ color:var(--green); font-weight:700; font-size:22px; }
+  .menu-stats .sub{ display:block; margin-top:4px; font-size:13px; color:var(--ink-dim); }
+  .menu-nav{ flex:1; display:flex; flex-direction:column; gap:14px; justify-content:center; }
+  #btn-play{ height:96px; font-size:26px; border-color:var(--gold-dim); }
+  .menu-row{ display:flex; gap:14px; }
+  .menu-row .focusable{ flex:1; height:64px; font-size:16px; }
+  .menu-status{
+    min-height:18px; text-align:center; font-size:13px; color:var(--cyan); margin-top:2px;
+  }
+  .menu-footer{
+    border-top:1px solid #1c2a26; padding-top:14px; margin-top:auto;
+  }
+  .mode-toggle{ display:flex; gap:10px; }
+  .mode-toggle .focusable{
+    flex:1; height:56px; font-size:14px;
+  }
+  .mode-toggle .focusable.selected{
+    border-color:var(--green); color:var(--green); box-shadow:0 0 14px rgba(57,255,20,0.35);
+  }
+  body.eco-mode .mode-toggle .focusable.selected{ box-shadow:none; }
+  .mode-caption{ text-align:center; font-size:11px; color:var(--ink-dim); margin-top:8px; letter-spacing:0.08em; }
+
+  /* ================= GAME TABLE ================= */
+  #screen-game{ background:radial-gradient(ellipse at 50% 30%, var(--felt), #000 78%); }
+
+  .table-rail{
+    height:16px; margin:0 38px; border-top:2px solid var(--gold-dim);
+    border-radius:50%/100%; opacity:0.55;
+  }
+  .table-rules{
+    text-align:center; font-size:9px; letter-spacing:0.06em; color:var(--ink-dim);
+    opacity:0.85; padding:1px 14px 0; text-transform:uppercase;
+  }
+
+  .table-zone{ padding:9px 22px; }
+  .zone-label{
+    font-size:12px; letter-spacing:0.16em; color:var(--ink-dim); text-transform:uppercase;
+  }
+  .hand-row{ display:flex; gap:7px; min-height:78px; margin:6px 0; align-items:flex-start; flex-wrap:wrap; }
+
+  /* Cards: corner-index style with a big center pip, sliding in from the
+     dealer's shoe corner instead of just fading upward. transform/opacity
+     only — no layout-triggering properties — so this stays compositor-only. */
+  .card{
+    position:relative; width:48px; height:68px; border-radius:6px;
+    background:linear-gradient(165deg,#101010,#0a0a0a 60%,#060606);
+    border:2px solid #2a2a2a; display:flex;
+    align-items:center; justify-content:center; font-weight:700;
+    transform:translate(50px,-24px) scale(0.55) rotate(10deg); opacity:0;
+    transition:transform 280ms ease, opacity 280ms ease;
+  }
+  .card.dealt{ transform:translate(0,0) scale(1) rotate(0deg); opacity:1; }
+  body.eco-mode .card{ transition:none; }
+  .card.red{ color:var(--red); border-color:#3a1018; }
+  .card.lightsuit{ color:var(--ink); border-color:#2a2a2a; }
+  .card .pip{ font-size:22px; }
+  .card .idx{ position:absolute; font-size:10px; font-weight:800; line-height:1; letter-spacing:-0.02em; }
+  .card .idx-tl{ top:4px; left:4px; }
+  .card .idx-br{ bottom:4px; right:4px; transform:rotate(180deg); }
+  .card.facedown{
+    background:repeating-linear-gradient(135deg,#0c0c0c 0 6px,#11181a 6px 12px);
+    border-color:var(--cyan); color:transparent;
+  }
+  .card.facedown::after{
+    content:"♦"; position:absolute; font-size:18px; color:var(--cyan); opacity:0.45;
+  }
+
+  .total-pill{
+    display:inline-block; margin-top:2px; padding:3px 10px; border-radius:20px;
+    background:#0c0c0c; border:1px solid #1c2a26; font-size:13px; color:var(--ink);
+  }
+  .total-pill.bust{ color:var(--red); border-color:var(--red); }
+  .total-pill.bj{ color:var(--gold); border-color:var(--gold); }
+
+  /* Player can carry up to two hands at once after a split */
+  .hand-block{ border-left:3px solid transparent; padding-left:7px; margin-bottom:4px; }
+  .hand-block.hidden-row{ display:none !important; }
+  .hand-block.active{ border-left-color:var(--cyan); }
+  .hand-tag{
+    display:none; font-size:11px; color:var(--cyan); letter-spacing:0.1em;
+    margin-right:8px; vertical-align:middle;
+  }
+  #player-zone.split .hand-tag{ display:inline-block; }
+
+  .table-mid{
+    display:flex; justify-content:space-between; align-items:center;
+    padding:3px 22px; font-size:13px; color:var(--ink-dim);
+  }
+  .table-mid .bet{ color:var(--gold); font-weight:700; font-size:15px; }
+  .table-mid .balance{ color:var(--green); font-weight:700; font-size:15px; }
+
+  #message-banner{
+    text-align:center; min-height:24px; font-size:15px; font-weight:700;
+    letter-spacing:0.02em; color:var(--cyan); margin:2px 0; padding:0 16px;
+  }
+  #message-banner.win{ color:var(--green); }
+  #message-banner.lose{ color:var(--red); }
+  #message-banner.bj{ color:var(--gold); }
+
+  .action-bar{
+    margin-top:auto; padding:8px 22px 14px; display:flex; gap:8px;
+  }
+  /* Direct-child only (>) so this doesn't cascade into the chip rack or
+     bet footer nested inside #row-betting below. */
+  .action-bar > .focusable{
+    flex:1; height:64px; font-size:14px;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; line-height:1.15;
+  }
+  .action-bar > .focusable .hint{
+    display:block; font-size:9px; font-weight:400; color:var(--ink-dim);
+    letter-spacing:0.03em; text-transform:none; margin-top:2px;
+  }
+
+  /* ---- Chip-based betting (a betting circle, not a +/- stepper) ---- */
+  #row-betting.action-bar{ flex-direction:column; align-items:stretch; gap:8px; }
+  .chip-rack{ display:flex; gap:8px; justify-content:center; }
+  .chip{
+    flex:0 0 auto; width:56px; height:56px; border-radius:50%; padding:0;
+    font-size:13px; background:#0c0c0c;
+    box-shadow:inset 0 0 0 4px #050505, inset 0 0 0 6px currentColor;
+  }
+  .chip[data-val="25"]{ border-color:var(--green); color:var(--green); }
+  .chip[data-val="100"]{ border-color:var(--cyan); color:var(--cyan); }
+  .chip[data-val="250"]{ border-color:var(--violet); color:var(--violet); }
+  .chip[data-val="500"]{ border-color:var(--gold); color:var(--gold); }
+  .chip[disabled]{ border-color:#3a3a3a !important; color:#4a4a4a !important; box-shadow:none !important; }
+  #btn-clear-bet{ flex:0 0 74px !important; height:56px !important; font-size:12px !important; }
+
+  .bet-footer{ display:flex; gap:8px; }
+  .bet-footer > .focusable{ flex:1; height:64px; font-size:14px; }
+
+  .bet-display{
+    flex:1; text-align:center; background:#0c0c0c; border:1px solid #1c2a26;
+    border-radius:10px; height:64px; display:flex; flex-direction:column; justify-content:center;
+  }
+  .bet-display.betting-circle{ border:2px dashed #29423b; }
+  .chip-stack{ display:flex; justify-content:center; height:9px; margin-bottom:3px; }
+  .chip-dot{
+    width:8px; height:8px; border-radius:50%; background:#0c0c0c;
+    border:1.5px solid var(--dotcolor, var(--ink-dim)); margin-left:-3px;
+  }
+  .chip-dot:first-child{ margin-left:0; }
+  .bet-display .amt{ color:var(--gold); font-size:20px; font-weight:700; }
+  .bet-display .lbl{ font-size:10px; color:var(--ink-dim); letter-spacing:0.1em; }
+  .hidden-row{ display:none !important; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ================= BOOT / CUSTOM OPENING ================= -->
+  <section class="screen active" id="screen-boot">
+    <canvas id="boot-canvas" width="380" height="380"></canvas>
+    <div id="boot-title">
+      <h1>Blackjack Mania</h1>
+      <p>AR Glasses Edition</p>
+    </div>
+    <div id="boot-result"></div>
+    <button class="focusable" id="boot-skip">Pinch to Enter</button>
+  </section>
+
+  <!-- ================= START MENU ================= -->
+  <section class="screen" id="screen-menu">
+    <div class="menu-header">
+      <h1>Blackjack Mania</h1>
+      <p>AR Glasses Edition</p>
+    </div>
+    <div class="menu-stats">
+      <span class="balance" id="menu-balance">1,000 chips</span>
+      <span class="sub" id="menu-substats">No hands played yet</span>
+    </div>
+    <div class="menu-nav">
+      <button class="focusable" id="btn-play">▶ Play</button>
+      <div class="menu-row">
+        <button class="focusable" id="btn-load">Load Game</button>
+        <button class="focusable" id="btn-save">Save Game</button>
+      </div>
+    </div>
+    <div class="menu-status" id="menu-status"></div>
+    <div class="menu-footer">
+      <div class="mode-toggle">
+        <button class="focusable" id="mode-performance" data-mode="performance">Performance</button>
+        <button class="focusable" id="mode-eco" data-mode="eco">Eco Mode</button>
+      </div>
+      <div class="mode-caption">Eco mode skips the intro animation and trims glow &amp; redraws to save battery</div>
+    </div>
+  </section>
+
+  <!-- ================= GAME TABLE ================= -->
+  <section class="screen" id="screen-game">
+    <div class="table-zone">
+      <div class="zone-label">Dealer</div>
+      <div class="hand-row" id="dealer-cards"></div>
+      <span class="total-pill" id="dealer-total">—</span>
+    </div>
+
+    <div class="table-rail"></div>
+
+    <div class="table-mid">
+      <span>Shoe: <b id="shoe-count">—</b> cards</span>
+      <span class="bet">Bet: <span id="mid-bet">0</span></span>
+      <span class="balance" id="mid-balance">0</span>
+    </div>
+    <div class="table-rules">Blackjack pays 3 to 2 · Insurance pays 2 to 1 · Dealer stands on all 17</div>
+
+    <div id="message-banner"></div>
+
+    <div class="table-zone" id="player-zone">
+      <div class="zone-label">You</div>
+      <div class="hand-block" id="hand-block-0">
+        <span class="hand-tag">HAND 1</span>
+        <div class="hand-row" id="player-cards-0"></div>
+        <span class="total-pill" id="player-total-0">—</span>
+      </div>
+      <div class="hand-block hidden-row" id="hand-block-1">
+        <span class="hand-tag">HAND 2</span>
+        <div class="hand-row" id="player-cards-1"></div>
+        <span class="total-pill" id="player-total-1">—</span>
+      </div>
+    </div>
+
+    <!-- Betting controls: chip rack on top, Menu / betting circle / Deal below -->
+    <div class="action-bar" id="row-betting">
+      <div class="chip-rack">
+        <button class="focusable chip" data-val="25">25</button>
+        <button class="focusable chip" data-val="100">100</button>
+        <button class="focusable chip" data-val="250">250</button>
+        <button class="focusable chip" data-val="500">500</button>
+        <button class="focusable" id="btn-clear-bet">Clear</button>
+      </div>
+      <div class="bet-footer">
+        <button class="focusable" id="btn-menu-bet">Menu</button>
+        <div class="bet-display betting-circle">
+          <div class="chip-stack" id="chip-stack"></div>
+          <span class="amt" id="bet-amount">0</span>
+          <span class="lbl">BET</span>
+        </div>
+        <button class="focusable" id="btn-deal">Deal</button>
+      </div>
+    </div>
+
+    <!-- Insurance prompt (visible only when dealer shows an Ace) -->
+    <div class="action-bar hidden-row" id="row-insurance">
+      <button class="focusable" id="btn-insurance-no">No Thanks</button>
+      <div class="bet-display">
+        <span class="amt" id="insurance-cost">0</span>
+        <span class="lbl">INSURANCE COST</span>
+      </div>
+      <button class="focusable" id="btn-insurance-yes">Insure</button>
+    </div>
+
+    <!-- Play controls (visible during player turn) -->
+    <div class="action-bar hidden-row" id="row-playing">
+      <button class="focusable" id="btn-hit">Hit<span class="hint">tap felt</span></button>
+      <button class="focusable" id="btn-stand">Stand<span class="hint">wave hand</span></button>
+      <button class="focusable" id="btn-double">Double</button>
+      <button class="focusable" id="btn-split">Split</button>
+    </div>
+
+    <!-- Resolved controls -->
+    <div class="action-bar hidden-row" id="row-resolved">
+      <button class="focusable" id="btn-menu-res">Menu</button>
+      <button class="focusable" id="btn-next-hand">Next Hand ▶</button>
+    </div>
+  </section>
+
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ==========================================================================
+     STORAGE — standard Web Storage API per Meta's Web Apps docs.
+     Wrapped defensively: some preview/sandboxed browser contexts block
+     localStorage entirely, so we fall back to an in-memory object rather
+     than letting the whole app crash.
+  ========================================================================== */
+  var memoryFallback = {};
+  var storageOK = true;
+  (function testStorage(){
+    try{
+      localStorage.setItem("__bjm_test__","1");
+      localStorage.removeItem("__bjm_test__");
+    }catch(e){ storageOK = false; }
+  })();
+  function storeGet(key){
+    try{ return storageOK ? localStorage.getItem(key) : (memoryFallback[key] || null); }
+    catch(e){ return memoryFallback[key] || null; }
+  }
+  function storeSet(key, val){
+    try{
+      if(storageOK){ localStorage.setItem(key, val); }
+      else { memoryFallback[key] = val; }
+    }catch(e){ memoryFallback[key] = val; }
+  }
+
+  var SAVE_KEY = "blackjackMania.save";
+  var SETTINGS_KEY = "blackjackMania.settings";
+
+  /* ==========================================================================
+     PAGE VISIBILITY — pause the dealer's auto-draw loop while the page (or
+     the glasses display) is hidden, so a round doesn't quietly finish
+     itself, and so the app isn't re-rendering a screen nobody can see.
+  ========================================================================== */
+  var appHidden = false;
+  document.addEventListener("visibilitychange", function(){
+    appHidden = document.hidden;
+  });
+
+  /* ==========================================================================
+     D-PAD / FOCUS NAVIGATION
+     Adapted from Meta's Build guide sample (Input: Neural band and captouch
+     gesture). Scoped to the active screen, and skips anything not actually
+     rendered (display:none rows during betting vs. insurance vs. playing
+     vs. resolved) by checking for a `.hidden-row` ancestor — a plain class
+     lookup, not an offsetParent check, which would force a layout pass.
+  ========================================================================== */
+  var DPAD = {
+    UP:"ArrowUp", DOWN:"ArrowDown", LEFT:"ArrowLeft", RIGHT:"ArrowRight",
+    SELECT:"Enter", BACK:"Escape"
+  };
+
+  function focusablesInActiveScreen(){
+    var active = document.querySelector(".screen.active");
+    if(!active) return [];
+    return Array.from(active.querySelectorAll(".focusable:not([disabled])"))
+      .filter(function(el){ return !el.closest(".hidden-row"); });
+  }
+
+  function moveFocus(direction){
+    var focusables = focusablesInActiveScreen();
+    if(!focusables.length) return;
+    var idx = focusables.indexOf(document.activeElement);
+    if(idx === -1){ focusables[0].focus(); return; }
+    var next;
+    if(direction === "up" || direction === "left"){
+      next = idx > 0 ? idx - 1 : focusables.length - 1;
+    } else {
+      next = idx < focusables.length - 1 ? idx + 1 : 0;
+    }
+    focusables[next].focus();
+  }
+
+  function focusFirstInActiveScreen(){
+    var focusables = focusablesInActiveScreen();
+    if(focusables.length) focusables[0].focus();
+  }
+
+  document.addEventListener("keydown", function(e){
+    switch(e.key){
+      case DPAD.UP:     moveFocus("up");    break;
+      case DPAD.DOWN:   moveFocus("down");  break;
+      case DPAD.LEFT:   moveFocus("left");  break;
+      case DPAD.RIGHT:  moveFocus("right"); break;
+      case DPAD.SELECT:
+        if(document.activeElement && document.activeElement.classList.contains("focusable")){
+          document.activeElement.click();
+        }
+        break;
+      case DPAD.BACK:
+        // NOTE: MRBD does not yet list hardware back-navigation as a
+        // supported capability. This exists only for desktop-browser
+        // testing convenience — every screen also has an on-screen
+        // focusable Menu/Back button that works on real hardware.
+        goToMenu();
+        break;
+      default: return;
+    }
+    e.preventDefault();
+  });
+
+  /* ==========================================================================
+     SCREEN MANAGEMENT
+  ========================================================================== */
+  function showScreen(id){
+    document.querySelectorAll(".screen").forEach(function(s){ s.classList.remove("active"); });
+    document.getElementById(id).classList.add("active");
+    focusFirstInActiveScreen();
+  }
+
+  /* ==========================================================================
+     SETTINGS (performance / eco) — persisted separately from save data
+  ========================================================================== */
+  var ecoMode = false;
+  function loadSettings(){
+    var raw = storeGet(SETTINGS_KEY);
+    if(raw){
+      try{
+        var s = JSON.parse(raw);
+        ecoMode = !!s.ecoMode;
+      }catch(e){ /* ignore corrupt settings */ }
+    }
+    applyMode();
+  }
+  function saveSettings(){
+    storeSet(SETTINGS_KEY, JSON.stringify({ ecoMode: ecoMode }));
+  }
+  function applyMode(){
+    document.body.classList.toggle("eco-mode", ecoMode);
+    document.getElementById("mode-performance").classList.toggle("selected", !ecoMode);
+    document.getElementById("mode-eco").classList.toggle("selected", ecoMode);
+  }
+  document.getElementById("mode-performance").addEventListener("click", function(){
+    ecoMode = false; applyMode(); saveSettings();
+  });
+  document.getElementById("mode-eco").addEventListener("click", function(){
+    ecoMode = true; applyMode(); saveSettings();
+  });
+
+  /* ==========================================================================
+     GAME STATE
+     state.hands holds 1 or 2 hand objects. Splitting turns 1 hand into 2;
+     everything else (no resplit, insurance, dealer logic) treats
+     state.hands as the source of truth instead of a single flat hand.
+  ========================================================================== */
+  var state = {
+    balance: 1000,
+    bet: 0,
+    shoe: [],
+    hands: [],              // [{ cards, bet, doneFlag, fromSplit, isSplitAces }]
+    activeHandIdx: 0,
+    dealer: [],
+    phase: "betting",       // betting | insurance | playing | dealer | resolved
+    dealerHidden: true,
+    insurance: { taken:false, amount:0 },
+    stats: { hands:0, wins:0, losses:0, pushes:0, blackjacks:0 }
+  };
+
+  var MIN_BET = 25, MAX_BET = 1000;
+  var RANKS = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"];
+  var SUITS = [
+    { sym:"♠", red:false }, { sym:"♥", red:true },
+    { sym:"♦", red:true },  { sym:"♣", red:false }
+  ];
+  var DECKS_IN_SHOE = 6;
+  var RESHUFFLE_THRESHOLD = 26; // reshuffle when shoe gets this low
+
+  function buildShoe(){
+    var shoe = [];
+    for(var d=0; d<DECKS_IN_SHOE; d++){
+      for(var s=0; s<SUITS.length; s++){
+        for(var r=0; r<RANKS.length; r++){
+          shoe.push({ rank: RANKS[r], suit: SUITS[s].sym, red: SUITS[s].red });
+        }
+      }
+    }
+    // Fisher-Yates shuffle
+    for(var i = shoe.length - 1; i > 0; i--){
+      var j = Math.floor(Math.random() * (i + 1));
+      var tmp = shoe[i]; shoe[i] = shoe[j]; shoe[j] = tmp;
+    }
+    return shoe;
+  }
+
+  function drawCard(){
+    if(state.shoe.length <= RESHUFFLE_THRESHOLD){
+      state.shoe = buildShoe();
+    }
+    return state.shoe.pop();
+  }
+
+  function cardValue(rank){
+    if(rank === "A") return 11;
+    if(rank === "K" || rank === "Q" || rank === "J" || rank === "10") return 10;
+    return parseInt(rank, 10);
+  }
+
+  function handTotal(cards){
+    var total = 0, aces = 0;
+    cards.forEach(function(c){
+      total += cardValue(c.rank);
+      if(c.rank === "A") aces++;
+    });
+    while(total > 21 && aces > 0){ total -= 10; aces--; }
+    return total;
+  }
+
+  // A "natural" blackjack only counts on the original two cards dealt
+  // before any split — a 21 made from a post-split hand still wins, just
+  // at even money instead of the 3:2 bonus. This matches standard table rules.
+  function isBlackjackHand(hand){
+    return !hand.fromSplit && hand.cards.length === 2 && handTotal(hand.cards) === 21;
+  }
+  function dealerHasBlackjack(){
+    return isBlackjackHand({ cards: state.dealer, fromSplit:false });
+  }
+
+  function makeHand(cards, bet, fromSplit){
+    return { cards:cards, bet:bet, doneFlag:false, fromSplit:!!fromSplit, isSplitAces:false };
+  }
+  function activeHand(){
+    return state.hands[state.activeHandIdx] || null;
+  }
+
+  /* ==========================================================================
+     RENDERING — game table
+  ========================================================================== */
+  function renderCard(card, faceDown){
+    var div = document.createElement("div");
+    if(faceDown){
+      div.className = "card facedown";
+      return div;
+    }
+    div.className = "card " + (card.red ? "red" : "lightsuit");
+    div.innerHTML =
+      "<span class='idx idx-tl'>" + card.rank + card.suit + "</span>" +
+      "<span class='pip'>" + card.suit + "</span>" +
+      "<span class='idx idx-br'>" + card.rank + card.suit + "</span>";
+    return div;
+  }
+
+  // Incremental DOM sync for a row of cards: only creates or replaces the
+  // node(s) that actually changed (a newly dealt card, or the dealer's
+  // hole card flipping face up) instead of wiping and rebuilding the whole
+  // row on every render. Keeps already-dealt cards from re-triggering
+  // their slide-in animation, and avoids needless layout/paint work.
+  function syncHandRow(containerEl, cards, hiddenIndices){
+    while(containerEl.children.length > cards.length){
+      containerEl.removeChild(containerEl.lastChild);
+    }
+    for(var i = 0; i < cards.length; i++){
+      var wantFaceDown = !!(hiddenIndices && hiddenIndices.indexOf(i) !== -1);
+      var node = containerEl.children[i];
+      var isFaceDown = !!(node && node.classList.contains("facedown"));
+      if(!node || isFaceDown !== wantFaceDown){
+        var fresh = renderCard(cards[i], wantFaceDown);
+        if(node){ containerEl.replaceChild(fresh, node); } else { containerEl.appendChild(fresh); }
+        (function(n){ requestAnimationFrame(function(){ n.classList.add("dealt"); }); })(fresh);
+      }
+    }
+  }
+
+  function fillHandPill(pillEl, cards, hand){
+    var total = handTotal(cards);
+    var bj = hand ? isBlackjackHand(hand) : (cards.length === 2 && total === 21);
+    pillEl.textContent = bj ? "Blackjack! 21" : (total + (total > 21 ? " — Bust" : ""));
+    pillEl.className = "total-pill" + (total > 21 ? " bust" : "") + (bj ? " bj" : "");
+  }
+
+  function renderTable(){
+    // ---- Dealer ----
+    syncHandRow(document.getElementById("dealer-cards"), state.dealer, state.dealerHidden ? [1] : []);
+    var dPill = document.getElementById("dealer-total");
+    if(!state.dealer.length){
+      dPill.textContent = "—"; dPill.className = "total-pill";
+    } else if(state.dealerHidden){
+      dPill.textContent = cardValue(state.dealer[0].rank) + " + ?";
+      dPill.className = "total-pill";
+    } else {
+      fillHandPill(dPill, state.dealer, { cards: state.dealer, fromSplit:false });
+    }
+
+    // ---- Player hand(s) ----
+    var zone = document.getElementById("player-zone");
+    zone.classList.toggle("split", state.hands.length > 1);
+    for(var idx = 0; idx < 2; idx++){
+      var block = document.getElementById("hand-block-" + idx);
+      var hand = state.hands[idx];
+      block.classList.toggle("hidden-row", !hand);
+      if(!hand) continue;
+      block.classList.toggle("active", idx === state.activeHandIdx && state.phase === "playing");
+      syncHandRow(document.getElementById("player-cards-" + idx), hand.cards, []);
+      fillHandPill(document.getElementById("player-total-" + idx), hand.cards, hand);
+    }
+
+    document.getElementById("shoe-count").textContent = state.shoe.length;
+    var betLabel = state.hands.length
+      ? state.hands.map(function(h){ return h.bet; }).join(" + ")
+      : state.bet;
+    document.getElementById("mid-bet").textContent = betLabel;
+    document.getElementById("mid-balance").textContent = state.balance + " chips";
+  }
+
+  function setMessage(text, kind){
+    var el = document.getElementById("message-banner");
+    el.textContent = text || "";
+    el.className = kind ? kind : "";
+  }
+
+  function setPhaseRows(phase){
+    document.getElementById("row-betting").classList.toggle("hidden-row", phase !== "betting");
+    document.getElementById("row-insurance").classList.toggle("hidden-row", phase !== "insurance");
+    document.getElementById("row-playing").classList.toggle("hidden-row", phase !== "playing");
+    document.getElementById("row-resolved").classList.toggle("hidden-row", phase !== "resolved");
+    focusFirstInActiveScreen();
+  }
+
+  /* ==========================================================================
+     CHIP-BASED BETTING
+     Tap a chip to add its value to the wager, Clear to reset it — closer
+     to placing real chips in a betting circle than a generic +/- stepper.
+  ========================================================================== */
+  function chipColor(val){
+    switch(val){
+      case 25: return "var(--green)";
+      case 100: return "var(--cyan)";
+      case 250: return "var(--violet)";
+      case 500: return "var(--gold)";
+      default: return "var(--ink-dim)";
+    }
+  }
+
+  function renderChipStack(el, amount){
+    el.innerHTML = "";
+    if(amount <= 0) return;
+    var denoms = [500, 250, 100, 25];
+    var remaining = amount, shown = 0;
+    for(var i = 0; i < denoms.length && shown < 6; i++){
+      while(remaining >= denoms[i] && shown < 6){
+        var dot = document.createElement("span");
+        dot.className = "chip-dot";
+        dot.style.setProperty("--dotcolor", chipColor(denoms[i]));
+        el.appendChild(dot);
+        remaining -= denoms[i];
+        shown++;
+      }
+    }
+  }
+
+  function refreshBetUI(){
+    document.getElementById("bet-amount").textContent = state.bet;
+    renderChipStack(document.getElementById("chip-stack"), state.bet);
+    document.querySelectorAll(".chip").forEach(function(btn){
+      var val = parseInt(btn.getAttribute("data-val"), 10);
+      btn.disabled = state.bet >= MAX_BET || (state.bet + val) > state.balance;
+    });
+    document.getElementById("btn-clear-bet").disabled = state.bet <= 0;
+    document.getElementById("btn-deal").disabled = state.bet < MIN_BET || state.bet > state.balance;
+    if(document.activeElement && document.activeElement.disabled){
+      focusFirstInActiveScreen();
+    }
+  }
+
+  function addChipToBet(val){
+    state.bet = Math.min(state.bet + val, MAX_BET, state.balance);
+    refreshBetUI();
+  }
+  function clearBet(){
+    state.bet = 0;
+    refreshBetUI();
+  }
+
+  /* ==========================================================================
+     GAME FLOW
+  ========================================================================== */
+  function startBettingPhase(){
+    state.phase = "betting";
+    state.hands = []; state.dealer = []; state.dealerHidden = true; state.activeHandIdx = 0;
+    state.insurance = { taken:false, amount:0 };
+    renderTable();
+    setMessage("Place your bet", "");
+    refreshBetUI();
+    setPhaseRows("betting");
+  }
+
+  function dealHand(){
+    if(state.bet < MIN_BET || state.balance < state.bet) return;
+    state.balance -= state.bet;
+    state.hands = [ makeHand([drawCard(), drawCard()], state.bet, false) ];
+    state.activeHandIdx = 0;
+    state.dealer = [drawCard(), drawCard()];
+    state.dealerHidden = true;
+    state.insurance = { taken:false, amount:0 };
+    renderTable();
+    setMessage("", "");
+
+    // Insurance is only ever offered when the dealer's up-card is an
+    // Ace — the standard casino trigger.
+    if(state.dealer[0].rank === "A"){
+      state.phase = "insurance";
+      var cost = Math.floor(state.hands[0].bet / 2);
+      document.getElementById("insurance-cost").textContent = cost;
+      document.getElementById("btn-insurance-yes").disabled = state.balance < cost;
+      setMessage("Dealer shows Ace — take insurance?", "");
+      setPhaseRows("insurance");
+      return;
+    }
+    proceedAfterInsuranceCheck();
+  }
+
+  function insuranceYes(){
+    if(state.phase !== "insurance") return;
+    var cost = Math.floor(state.hands[0].bet / 2);
+    if(state.balance < cost) return;
+    state.balance -= cost;
+    state.insurance = { taken:true, amount:cost };
+    settleInsuranceAndContinue();
+  }
+
+  function insuranceNo(){
+    if(state.phase !== "insurance") return;
+    state.insurance = { taken:false, amount:0 };
+    settleInsuranceAndContinue();
+  }
+
+  function settleInsuranceAndContinue(){
+    if(dealerHasBlackjack()){
+      // Insurance pays 2:1 — the player gets their stake back plus
+      // double, i.e. amount * 3 total returned.
+      if(state.insurance.taken){
+        state.balance += state.insurance.amount * 3;
+      }
+      state.dealerHidden = false;
+      resolveAllHands();
+      return;
+    }
+    // Dealer doesn't have it — any insurance taken is simply lost
+    // (already deducted from balance above).
+    proceedAfterInsuranceCheck();
+  }
+
+  function proceedAfterInsuranceCheck(){
+    var dealerUp = state.dealer[0];
+    var dealerMightHaveBJ = dealerUp.rank === "A" || cardValue(dealerUp.rank) === 10;
+    if(dealerMightHaveBJ && dealerHasBlackjack()){
+      state.dealerHidden = false;
+      resolveAllHands();
+      return;
+    }
+    if(isBlackjackHand(state.hands[0])){
+      state.dealerHidden = false;
+      resolveAllHands();
+      return;
+    }
+    state.phase = "playing";
+    renderTable();
+    refreshActionAvailability();
+    setPhaseRows("playing");
+  }
+
+  function refreshActionAvailability(){
+    var hand = activeHand();
+    var canAct = state.phase === "playing" && hand && !hand.doneFlag;
+    document.getElementById("btn-hit").disabled = !canAct;
+    document.getElementById("btn-stand").disabled = !canAct;
+    document.getElementById("btn-double").disabled = !(
+      canAct && hand.cards.length === 2 && !hand.isSplitAces && state.balance >= hand.bet
+    );
+    var canSplit = canAct && state.hands.length === 1 && hand.cards.length === 2 &&
+      hand.cards[0].rank === hand.cards[1].rank && state.balance >= hand.bet;
+    document.getElementById("btn-split").disabled = !canSplit;
+
+    if(document.activeElement && document.activeElement.disabled){
+      focusFirstInActiveScreen();
+    }
+  }
+
+  function advanceHand(){
+    for(var i = state.activeHandIdx + 1; i < state.hands.length; i++){
+      if(!state.hands[i].doneFlag){
+        state.activeHandIdx = i;
+        renderTable();
+        refreshActionAvailability();
+        return;
+      }
+    }
+    runDealerTurn();
+  }
+
+  function playerHit(){
+    if(state.phase !== "playing") return;
+    var hand = activeHand();
+    if(!hand || hand.doneFlag) return;
+    hand.cards.push(drawCard());
+    renderTable();
+    if(handTotal(hand.cards) > 21){
+      hand.doneFlag = true;
+      advanceHand();
+    } else {
+      refreshActionAvailability();
+    }
+  }
+
+  function playerStand(){
+    if(state.phase !== "playing") return;
+    var hand = activeHand();
+    if(!hand || hand.doneFlag) return;
+    hand.doneFlag = true;
+    advanceHand();
+  }
+
+  function playerDouble(){
+    if(state.phase !== "playing") return;
+    var hand = activeHand();
+    if(!hand || hand.doneFlag) return;
+    if(hand.cards.length !== 2 || hand.isSplitAces) return;
+    if(state.balance < hand.bet) return;
+    state.balance -= hand.bet;
+    hand.bet *= 2;
+    hand.cards.push(drawCard());
+    hand.doneFlag = true;
+    renderTable();
+    advanceHand();
+  }
+
+  function playerSplit(){
+    if(state.phase !== "playing") return;
+    if(state.hands.length !== 1) return;
+    var hand = state.hands[0];
+    if(hand.cards.length !== 2 || hand.cards[0].rank !== hand.cards[1].rank) return;
+    if(state.balance < hand.bet) return;
+
+    state.balance -= hand.bet;
+    var c1 = hand.cards[0], c2 = hand.cards[1];
+    var splittingAces = c1.rank === "A";
+
+    var h1 = makeHand([c1, drawCard()], hand.bet, true);
+    var h2 = makeHand([c2, drawCard()], hand.bet, true);
+    if(splittingAces){
+      h1.isSplitAces = true; h1.doneFlag = true;
+      h2.isSplitAces = true; h2.doneFlag = true;
+    }
+    state.hands = [h1, h2];
+    state.activeHandIdx = 0;
+    renderTable();
+
+    if(state.hands[0].doneFlag){
+      advanceHand();
+    } else {
+      refreshActionAvailability();
+    }
+  }
+
+  function runDealerTurn(){
+    state.phase = "dealer";
+    state.dealerHidden = false;
+    renderTable();
+    var stepDelay = ecoMode ? 0 : 500;
+
+    function step(){
+      if(appHidden){
+        // Don't keep dealing into a screen nobody can see — wait for the
+        // page/display to come back before drawing the next card.
+        setTimeout(step, 400);
+        return;
+      }
+      if(handTotal(state.dealer) < 17){
+        state.dealer.push(drawCard());
+        renderTable();
+        setTimeout(step, stepDelay);
+      } else {
+        resolveAllHands();
+      }
+    }
+    setTimeout(step, stepDelay);
+  }
+
+  function describeOutcome(tag, bet, ctx){
+    if(tag === "bj") return "Blackjack! +" + Math.floor(bet * 1.5);
+    if(tag === "push") return "Push";
+    if(tag === "win") return ctx.dealerBust ? ("Dealer busts, win +" + bet) : ("Win +" + bet);
+    // lose
+    if(ctx.playerBust) return "Bust, lose " + bet;
+    if(ctx.dealerBJ) return "Dealer BJ, lose " + bet;
+    return "Lose " + bet;
+  }
+
+  function resolveAllHands(){
+    state.phase = "resolved";
+    state.dealerHidden = false;
+    renderTable();
+
+    var dTotal = handTotal(state.dealer);
+    var dBJ = dealerHasBlackjack();
+    var dealerBust = dTotal > 21;
+    var parts = [];
+    var sawWin = false, sawLose = false, sawBJ = false;
+
+    state.hands.forEach(function(hand, i){
+      var pTotal = handTotal(hand.cards);
+      var pBJ = isBlackjackHand(hand);
+      var tag;
+
+      if(pBJ && dBJ){ tag = "push"; state.balance += hand.bet; }
+      else if(pBJ){ tag = "bj"; state.balance += Math.floor(hand.bet * 2.5); }
+      else if(dBJ){ tag = "lose"; }
+      else if(pTotal > 21){ tag = "lose"; }
+      else if(dealerBust){ tag = "win"; state.balance += hand.bet * 2; }
+      else if(pTotal > dTotal){ tag = "win"; state.balance += hand.bet * 2; }
+      else if(pTotal < dTotal){ tag = "lose"; }
+      else { tag = "push"; state.balance += hand.bet; }
+
+      if(tag === "win"){ state.stats.wins++; sawWin = true; }
+      else if(tag === "bj"){ state.stats.wins++; state.stats.blackjacks++; sawWin = true; sawBJ = true; }
+      else if(tag === "lose"){ state.stats.losses++; sawLose = true; }
+      else { state.stats.pushes++; }
+
+      var prefix = state.hands.length > 1 ? ("H" + (i + 1) + ": ") : "";
+      parts.push(prefix + describeOutcome(tag, hand.bet, {
+        dealerBust: dealerBust, playerBust: pTotal > 21, dealerBJ: dBJ
+      }));
+    });
+
+    state.stats.hands++;
+
+    var insuranceNote = "";
+    if(state.insurance.taken){
+      insuranceNote = dBJ ? "Insurance paid 2:1.  " : "Insurance lost.  ";
+    }
+    var kind = sawBJ ? "bj" : (sawWin && !sawLose ? "win" : (sawLose && !sawWin ? "lose" : ""));
+    setMessage(insuranceNote + parts.join("   ·   "), kind);
+
+    setPhaseRows("resolved");
+    renderTable();
+    autoSave();
+  }
+
+  function nextHand(){
+    state.bet = Math.min(state.bet, Math.max(0, state.balance));
+    startBettingPhase();
+  }
+
+  /* ==========================================================================
+     SAVE / LOAD
+  ========================================================================== */
+  function autoSave(){
+    var payload = {
+      balance: state.balance, bet: state.bet, stats: state.stats, savedAt: Date.now()
+    };
+    storeSet(SAVE_KEY, JSON.stringify(payload));
+  }
+
+  function manualSave(){
+    autoSave();
+    flashMenuStatus("Game saved ✓");
+  }
+
+  function manualLoad(){
+    var raw = storeGet(SAVE_KEY);
+    if(!raw){
+      flashMenuStatus("No saved game found");
+      return;
+    }
+    try{
+      var data = JSON.parse(raw);
+      state.balance = typeof data.balance === "number" ? data.balance : 1000;
+      state.bet = typeof data.bet === "number" ? data.bet : 0;
+      state.stats = data.stats || state.stats;
+      flashMenuStatus("Save loaded ✓ — Balance: " + state.balance + " chips");
+      refreshMenuStats();
+    }catch(e){
+      flashMenuStatus("Save data was unreadable");
+    }
+  }
+
+  var statusTimer = null;
+  function flashMenuStatus(msg){
+    var el = document.getElementById("menu-status");
+    el.textContent = msg;
+    if(statusTimer) clearTimeout(statusTimer);
+    statusTimer = setTimeout(function(){ el.textContent = ""; }, 3200);
+  }
+
+  function refreshMenuStats(){
+    document.getElementById("menu-balance").textContent = state.balance.toLocaleString() + " chips";
+    var s = state.stats;
+    document.getElementById("menu-substats").textContent = s.hands === 0
+      ? "No hands played yet"
+      : "Hands: " + s.hands + " · W-L-P: " + s.wins + "-" + s.losses + "-" + s.pushes + " · BJ: " + s.blackjacks;
+  }
+
+  function goToMenu(){
+    refreshMenuStats();
+    showScreen("screen-menu");
+  }
+
+  /* ==========================================================================
+     WIRE UP CONTROLS
+  ========================================================================== */
+  document.getElementById("btn-play").addEventListener("click", function(){
+    state.shoe = buildShoe();
+    nextHand();
+    showScreen("screen-game");
+  });
+  document.getElementById("btn-load").addEventListener("click", function(){
+    manualLoad();
+  });
+  document.getElementById("btn-save").addEventListener("click", function(){
+    manualSave();
+  });
+
+  document.querySelectorAll(".chip").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      addChipToBet(parseInt(btn.getAttribute("data-val"), 10));
+    });
+  });
+  document.getElementById("btn-clear-bet").addEventListener("click", clearBet);
+  document.getElementById("btn-deal").addEventListener("click", dealHand);
+  document.getElementById("btn-insurance-yes").addEventListener("click", insuranceYes);
+  document.getElementById("btn-insurance-no").addEventListener("click", insuranceNo);
+  document.getElementById("btn-hit").addEventListener("click", playerHit);
+  document.getElementById("btn-stand").addEventListener("click", playerStand);
+  document.getElementById("btn-double").addEventListener("click", playerDouble);
+  document.getElementById("btn-split").addEventListener("click", playerSplit);
+  document.getElementById("btn-next-hand").addEventListener("click", nextHand);
+  document.getElementById("btn-menu-bet").addEventListener("click", goToMenu);
+  document.getElementById("btn-menu-res").addEventListener("click", goToMenu);
+
+  /* ==========================================================================
+     BOOT / OPENING — roulette wheel animation
+     European wheel sequence (public, standard game layout — not a creative
+     work). "Black" pockets are rendered in deep cyan rather than literal
+     black/charcoal, since on MRBD's additive display, dark pixels emit no
+     light and would simply disappear against the lens background.
+  ========================================================================== */
+  var WHEEL_ORDER = [0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3,26];
+  var RED_NUMBERS = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36];
+
+  function pocketColor(n){
+    if(n === 0) return "#39ff14";              // green
+    if(RED_NUMBERS.indexOf(n) !== -1) return "#ff3b5c"; // red
+    return "#00bfff";                           // "black" substitute — bright cyan-blue
+  }
+
+  function runBootAnimation(){
+    var canvas = document.getElementById("boot-canvas");
+    var ctx = canvas.getContext("2d");
+    var cx = 190, cy = 190, outerR = 170, innerR = 70;
+    var pocketCount = WHEEL_ORDER.length;
+    var pocketAngle = (Math.PI * 2) / pocketCount;
+
+    var winningIndex = Math.floor(Math.random() * pocketCount);
+    var winningNumber = WHEEL_ORDER[winningIndex];
+
+    function drawWheel(rotation){
+      ctx.clearRect(0, 0, 380, 380);
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(rotation);
+
+      for(var i = 0; i < pocketCount; i++){
+        var a0 = i * pocketAngle;
+        var a1 = a0 + pocketAngle;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, outerR, a0, a1);
+        ctx.closePath();
+        ctx.fillStyle = pocketColor(WHEEL_ORDER[i]);
+        ctx.globalAlpha = 0.85;
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      ctx.beginPath();
+      ctx.arc(0, 0, innerR, 0, Math.PI * 2);
+      ctx.fillStyle = "#000000";
+      ctx.fill();
+      ctx.strokeStyle = "#ffc857";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.restore();
+
+      // fixed ball marker at top, pointing into the wheel as it spins beneath it
+      ctx.beginPath();
+      ctx.arc(cx, cy - outerR - 10, 7, 0, Math.PI * 2);
+      ctx.fillStyle = "#ffffff";
+      ctx.shadowColor = "#00d4ff";
+      ctx.shadowBlur = ecoMode ? 0 : 12;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    // Eco mode doesn't just shorten the spin — it skips the animation loop
+    // entirely and paints the final result in a single frame. That's zero
+    // requestAnimationFrame calls instead of a shorter run of them, which is
+    // the lowest-cost version of this opening screen we can offer.
+    if(ecoMode){
+      var finalAngle = (winningIndex * pocketAngle) + (Math.PI / 2);
+      drawWheel(finalAngle);
+      onWheelLanded(winningNumber);
+      return;
+    }
+
+    var duration = 4200, totalSpins = 5;
+    var targetAngle = totalSpins * Math.PI * 2 + (winningIndex * pocketAngle) + (Math.PI / 2);
+    var start = null;
+    function easeOutCubic(t){ return 1 - Math.pow(1 - t, 3); }
+
+    function frame(ts){
+      if(!start) start = ts;
+      var elapsed = ts - start;
+      var t = Math.min(1, elapsed / duration);
+      drawWheel(easeOutCubic(t) * targetAngle);
+      if(t < 1){
+        requestAnimationFrame(frame);
+      } else {
+        onWheelLanded(winningNumber);
+      }
+    }
+    drawWheel(0);
+    requestAnimationFrame(frame);
+  }
+
+  var bootAdvanced = false;
+  function onWheelLanded(number){
+    var resultEl = document.getElementById("boot-result");
+    resultEl.innerHTML = "Lucky number <b>" + number + "</b>";
+    resultEl.classList.add("show");
+    document.getElementById("boot-title").classList.add("show");
+    var delay = ecoMode ? 400 : 1500;
+    setTimeout(function(){ advanceFromBoot(); }, delay);
+  }
+
+  function advanceFromBoot(){
+    if(bootAdvanced) return;
+    bootAdvanced = true;
+    showScreen("screen-menu");
+  }
+
+  document.getElementById("boot-skip").addEventListener("click", advanceFromBoot);
+
+  /* ==========================================================================
+     INIT
+  ========================================================================== */
+  loadSettings();
+  // Try to resume a previous save automatically so balance/stats persist
+  // across launches; explicit Save/Load buttons remain available on demand.
+  (function tryAutoResume(){
+    var raw = storeGet(SAVE_KEY);
+    if(raw){
+      try{
+        var data = JSON.parse(raw);
+        if(typeof data.balance === "number") state.balance = data.balance;
+        if(typeof data.bet === "number") state.bet = data.bet;
+        if(data.stats) state.stats = data.stats;
+      }catch(e){ /* ignore corrupt save */ }
+    }
+  })();
+  refreshMenuStats();
+  showScreen("screen-boot");
+  runBootAnimation();
+  focusFirstInActiveScreen();
+
+})();
+</script>
+</body>
+</html>
